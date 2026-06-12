@@ -634,7 +634,7 @@ async def process_telegram_updates(session):
                         continue
                     await answer_callback(session, cb_id)
 
-                    elif data_cb == "renew_token":
+                    if data_cb == "renew_token":
                         bot_state["waiting_new_token"] = True
                         await send_simple_message(session,
                             "🔑 *Renouveler le token Stake*\n\n"

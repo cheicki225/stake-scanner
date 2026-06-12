@@ -30,10 +30,20 @@ bot_state = {
     "paused": False,
     "min_odd": 1.75,
     "last_update_id": 0,
+    # Regles Telegram
+    "exact_min_stake": 1000,
+    "bigodds_min_stake": 7000,
+    "bigodds_min_odd": 15,
     # Menu VIP
     "waiting_add_vip": False,
     "waiting_remove_vip": False,
     "waiting_min_odd": False,
+    # Modification montants
+    "waiting_stake_sport": None,      # sport en attente de modification
+    "waiting_exact_stake": False,
+    "waiting_bigodds_stake": False,
+    # Historique scans page
+    "history_page": 0,
     # Session
     "scan_count": 0,
     "total_sent": 0,
@@ -70,10 +80,10 @@ vip_consecutive = defaultdict(int)      # user -> nb paris consecutifs recents
 # REGLES TELEGRAM
 # ============================================================
 def should_send_telegram(bet):
-    if bet.get("exact") and bet.get("stake", 0) >= 1000:
+    if bet.get("exact") and bet.get("stake", 0) >= bot_state["exact_min_stake"]:
         return True, "Regle 1 - Score Exact"
-    if bet.get("odd", 0) >= 15 and bet.get("stake", 0) >= 7000:
-        return True, "Regle 2 - Grosse Cote (>=15)"
+    if bet.get("odd", 0) >= bot_state["bigodds_min_odd"] and bet.get("stake", 0) >= bot_state["bigodds_min_stake"]:
+        return True, f"Regle 2 - Grosse Cote (>={bot_state['bigodds_min_odd']})"
     return False, None
 
 def is_vip_user(bet):
@@ -215,11 +225,79 @@ async def send_main_menu(session):
         "inline_keyboard": [
             [{"text": "⭐ Gerer les VIP",        "callback_data": "menu_vip"}],
             [{"text": "⚙️ Parametres",            "callback_data": "menu_settings"}],
+            [{"text": "💰 Modifier les montants", "callback_data": "menu_stakes"}],
             [{"text": "📊 Statistiques",          "callback_data": "menu_stats"}],
+            [{"text": "📋 Historique scans",      "callback_data": "menu_history_0"}],
             [{"text": "⏸ Pause" if not bot_state["paused"] else "▶️ Reprendre", "callback_data": "toggle_pause"}],
             [{"text": "🔙 Fermer",                "callback_data": "close_menu"}],
         ]
     }
+    await send_simple_message(session, text, keyboard)
+
+async def send_stakes_menu(session):
+    text = (
+        f"💰 *Modifier les montants minimum*\n\n"
+        f"*Par sport :*\n"
+        f"⚽ Football : ${SPORT_CONFIG['football']['min_stake']:,}\n"
+        f"🎾 Tennis : ${SPORT_CONFIG['tennis']['min_stake']:,}\n"
+        f"🏓 Tennis de table : ${SPORT_CONFIG['tennis-table']['min_stake']:,}\n"
+        f"🏀 Basketball : ${SPORT_CONFIG['basketball']['min_stake']:,}\n"
+        f"🤾 Handball : ${SPORT_CONFIG['handball']['min_stake']:,}\n\n"
+        f"*Regles Telegram :*\n"
+        f"🎯 Score exact : ${bot_state['exact_min_stake']:,}\n"
+        f"💥 Grosse cote (x{bot_state['bigodds_min_odd']}) : ${bot_state['bigodds_min_stake']:,}\n"
+    )
+    keyboard = {
+        "inline_keyboard": [
+            [{"text": "⚽ Modifier Football",      "callback_data": "stake_football"}],
+            [{"text": "🎾 Modifier Tennis",         "callback_data": "stake_tennis"}],
+            [{"text": "🏓 Modifier Tennis de table","callback_data": "stake_tennis-table"}],
+            [{"text": "🏀 Modifier Basketball",     "callback_data": "stake_basketball"}],
+            [{"text": "🤾 Modifier Handball",       "callback_data": "stake_handball"}],
+            [{"text": "🎯 Modifier Score exact",    "callback_data": "stake_exact"}],
+            [{"text": "💥 Modifier Grosse cote",    "callback_data": "stake_bigodds"}],
+            [{"text": "🔙 Menu principal",          "callback_data": "open_menu"}],
+        ]
+    }
+    await send_simple_message(session, text, keyboard)
+
+async def send_history_menu(session, page=0):
+    per_page = 10
+    all_history = stats["history"]
+    total = len(all_history)
+    start = page * per_page
+    end = min(start + per_page, total)
+    page_bets = all_history[-(end) : -(start) if start > 0 else None][::-1] if total > 0 else []
+
+    if not page_bets:
+        await send_simple_message(session, "📋 Aucun scan effectue pour l'instant.")
+        return
+
+    lines = []
+    for i, h in enumerate(page_bets, start + 1):
+        cfg = SPORT_CONFIG.get(h.get("sport", ""), {"emoji": "🎲"})
+        bet_id = format_bet_id(h.get("id", "N/A"))
+        exact = "🎯" if h.get("exact") else ""
+        live = "🔴" if h.get("live") else ""
+        lines.append(
+            f"{i}. {cfg['emoji']}{exact}{live} *{h.get('match', 'N/A')}*\n"
+            f"    @{h.get('user','?')} | x{h.get('odd')} | ${h.get('stake',0):,}\n"
+            f"    🆔 {bet_id}"
+        )
+
+    text = f"📋 *Historique scans ({total} total) — Page {page+1}*\n\n" + "\n\n".join(lines)
+
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append({"text": "⬅️ Precedent", "callback_data": f"menu_history_{page-1}"})
+    if end < total:
+        nav_buttons.append({"text": "Suivant ➡️", "callback_data": f"menu_history_{page+1}"})
+
+    keyboard = {"inline_keyboard": []}
+    if nav_buttons:
+        keyboard["inline_keyboard"].append(nav_buttons)
+    keyboard["inline_keyboard"].append([{"text": "🔙 Menu principal", "callback_data": "open_menu"}])
+
     await send_simple_message(session, text, keyboard)
 
 async def send_vip_menu(session):
@@ -444,6 +522,9 @@ async def process_telegram_updates(session):
                         bot_state["waiting_add_vip"] = False
                         bot_state["waiting_remove_vip"] = False
                         bot_state["waiting_min_odd"] = False
+                        bot_state["waiting_exact_stake"] = False
+                        bot_state["waiting_bigodds_stake"] = False
+                        bot_state["waiting_stake_sport"] = None
                         await send_main_menu(session)
 
                     elif text == "/vip":
@@ -451,6 +532,9 @@ async def process_telegram_updates(session):
 
                     elif text == "/stats":
                         await send_stats_menu(session)
+
+                    elif text == "/historique":
+                        await send_history_menu(session, 0)
 
                     elif bot_state["waiting_add_vip"]:
                         username = text.lstrip("@").strip()
@@ -471,9 +555,50 @@ async def process_telegram_updates(session):
                                 await send_simple_message(session, f"✅ Cote minimum mise a jour : x{new_odd}")
                                 await send_settings_menu(session)
                             else:
-                                await send_simple_message(session, "⚠️ Cote invalide. Entre une valeur entre 1.0 et 50.0")
+                                await send_simple_message(session, "⚠️ Entre une valeur entre 1.0 et 50.0")
                         except:
                             await send_simple_message(session, "⚠️ Format invalide. Exemple : 2.5")
+
+                    elif bot_state["waiting_exact_stake"]:
+                        try:
+                            new_stake = float(text.replace(",", ".").replace("$", ""))
+                            if new_stake >= 0:
+                                bot_state["exact_min_stake"] = new_stake
+                                bot_state["waiting_exact_stake"] = False
+                                await send_simple_message(session, f"✅ Mise min. score exact mise a jour : ${new_stake:,.0f}")
+                                await send_stakes_menu(session)
+                            else:
+                                await send_simple_message(session, "⚠️ Montant invalide.")
+                        except:
+                            await send_simple_message(session, "⚠️ Format invalide. Exemple : 500")
+
+                    elif bot_state["waiting_bigodds_stake"]:
+                        try:
+                            new_stake = float(text.replace(",", ".").replace("$", ""))
+                            if new_stake >= 0:
+                                bot_state["bigodds_min_stake"] = new_stake
+                                bot_state["waiting_bigodds_stake"] = False
+                                await send_simple_message(session, f"✅ Mise min. grosse cote mise a jour : ${new_stake:,.0f}")
+                                await send_stakes_menu(session)
+                            else:
+                                await send_simple_message(session, "⚠️ Montant invalide.")
+                        except:
+                            await send_simple_message(session, "⚠️ Format invalide. Exemple : 5000")
+
+                    elif bot_state["waiting_stake_sport"]:
+                        sport = bot_state["waiting_stake_sport"]
+                        try:
+                            new_stake = float(text.replace(",", ".").replace("$", ""))
+                            if new_stake >= 0:
+                                SPORT_CONFIG[sport]["min_stake"] = new_stake
+                                bot_state["waiting_stake_sport"] = None
+                                cfg = SPORT_CONFIG[sport]
+                                await send_simple_message(session, f"✅ Mise min. {cfg['emoji']} {cfg['label']} mise a jour : ${new_stake:,.0f}")
+                                await send_stakes_menu(session)
+                            else:
+                                await send_simple_message(session, "⚠️ Montant invalide.")
+                        except:
+                            await send_simple_message(session, "⚠️ Format invalide. Exemple : 8000")
 
                 # Bouton clique
                 elif "callback_query" in update:
@@ -491,8 +616,13 @@ async def process_telegram_updates(session):
                         await send_vip_menu(session)
                     elif data_cb == "menu_settings":
                         await send_settings_menu(session)
+                    elif data_cb == "menu_stakes":
+                        await send_stakes_menu(session)
                     elif data_cb == "menu_stats":
                         await send_stats_menu(session)
+                    elif data_cb.startswith("menu_history_"):
+                        page = int(data_cb.replace("menu_history_", ""))
+                        await send_history_menu(session, page)
                     elif data_cb == "close_menu":
                         await send_simple_message(session, "Menu ferme. Tape /menu pour rouvrir.")
                     elif data_cb == "toggle_pause":
@@ -516,6 +646,22 @@ async def process_telegram_updates(session):
                         bot_state["waiting_min_odd"] = True
                         bot_state["waiting_add_vip"] = False
                         await send_simple_message(session, f"Cote actuelle : x{bot_state['min_odd']}\nEnvoie la nouvelle cote minimum (ex: 2.0) :")
+                    elif data_cb.startswith("stake_"):
+                        sport_or_rule = data_cb.replace("stake_", "")
+                        if sport_or_rule == "exact":
+                            bot_state["waiting_exact_stake"] = True
+                            bot_state["waiting_stake_sport"] = None
+                            await send_simple_message(session, f"Mise actuelle score exact : ${bot_state['exact_min_stake']:,}\nEnvoie le nouveau montant minimum (ex: 500) :")
+                        elif sport_or_rule == "bigodds":
+                            bot_state["waiting_bigodds_stake"] = True
+                            bot_state["waiting_stake_sport"] = None
+                            await send_simple_message(session, f"Mise actuelle grosse cote : ${bot_state['bigodds_min_stake']:,}\nEnvoie le nouveau montant minimum (ex: 5000) :")
+                        elif sport_or_rule in SPORT_CONFIG:
+                            bot_state["waiting_stake_sport"] = sport_or_rule
+                            bot_state["waiting_exact_stake"] = False
+                            bot_state["waiting_bigodds_stake"] = False
+                            cfg = SPORT_CONFIG[sport_or_rule]
+                            await send_simple_message(session, f"Mise actuelle {cfg['emoji']} {cfg['label']} : ${cfg['min_stake']:,}\nEnvoie le nouveau montant minimum (ex: 5000) :")
                     elif data_cb.startswith("toggle_"):
                         sport = data_cb.replace("toggle_", "")
                         if sport in SPORT_CONFIG:
@@ -532,14 +678,7 @@ async def process_telegram_updates(session):
                             await send_simple_message(session, f"✅ *@{removed}* supprime.")
                             await send_vip_menu(session)
                     elif data_cb == "show_history":
-                        if stats["history"]:
-                            lines = []
-                            for h in stats["history"][-10:]:
-                                cfg = SPORT_CONFIG.get(h["sport"], {"emoji": "🎲"})
-                                lines.append(f"{cfg['emoji']} {h['match']} | x{h['odd']} | ${h['stake']:,}")
-                            await send_simple_message(session, "📋 *10 derniers paris :*\n\n" + "\n".join(lines))
-                        else:
-                            await send_simple_message(session, "Aucun historique pour l'instant.")
+                        await send_history_menu(session, 0)
 
     except Exception as e:
         print(f"Updates erreur: {e}")

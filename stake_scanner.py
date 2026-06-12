@@ -1,18 +1,17 @@
 import asyncio
 import aiohttp
 import json
+import re
 from datetime import datetime, time
 from collections import defaultdict
+from playwright.async_api import async_playwright
 
 # ============================================================
 # CONFIG
 # ============================================================
 TELEGRAM_BOT_TOKEN = "8868714626:AAHhSU2GkIW0jdIao1I9ZvKFx71tAJtMAco"
 TELEGRAM_CHAT_ID = "7360478330"
-
-# Token de session Stake (x-access-token du navigateur)
-# A renouveler quand il expire (deconnexion de Stake)
-STAKE_SESSION_TOKEN = "edd0aade282af360a96023fdb4037702918585c2ee236b60c5e5f8f2b03bc2ccf0788b8cff2d3b041561fd5248d60588"
+STAKE_URL = "https://stake.com/fr/sports/home"
 
 # ============================================================
 # FILTRES PAR SPORT
@@ -719,125 +718,103 @@ async def process_telegram_updates(session):
         print(f"Updates erreur: {e}")
 
 # ============================================================
-# STAKE API - FLUX PUBLIC (sports/home)
+# PLAYWRIGHT - NAVIGATEUR AUTOMATIQUE
 # ============================================================
+playwright_browser = None
+playwright_page = None
+
+async def init_browser():
+    global playwright_browser, playwright_page
+    print("  Demarrage du navigateur Playwright...")
+    pw = await async_playwright().start()
+    playwright_browser = await pw.chromium.launch(
+        headless=True,
+        args=["--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage"]
+    )
+    context = await playwright_browser.new_context(
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        locale="fr-FR"
+    )
+    playwright_page = await context.new_page()
+    print("  Ouverture de stake.com/fr/sports/home...")
+    await playwright_page.goto(STAKE_URL, wait_until="networkidle", timeout=30000)
+    print("  Navigateur pret !")
+
 async def fetch_stake_bets(session):
-    url = "https://stake.com/_api/graphql"
-    headers = {
-        "Content-Type": "application/json",
-        "x-access-token": STAKE_SESSION_TOKEN,
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "referer": "https://stake.com/fr/sports/home",
-        "x-language": "fr",
-    }
+    global playwright_page
 
-    # Requete pour le fil public "Tous les Paris" visible sur sports/home
-    query = """
-    query PublicBetList($limit: Int, $offset: Int) {
-      sportBetList(limit: $limit, offset: $offset) {
-        id
-        amount
-        payout
-        odds
-        cashoutAt
-        status
-        active
-        bet {
-          ... on SportBet {
-            id
-            amount
-            payout
-            odds
-            isLive
-            isCashout
-            user { name }
-            outcomes {
-              odds
-              result
-              fixture {
-                id
-                name
-                slug
-                sport { name slug }
-                tournament { name }
-              }
-              market { marketType { name } }
-              selection { name }
+    if playwright_page is None:
+        try:
+            await init_browser()
+        except Exception as e:
+            print(f"  Navigateur erreur init: {e}")
+            return []
+
+    try:
+        # Intercepte les donnees via GraphQL depuis la page
+        bets_data = await playwright_page.evaluate("""
+            async () => {
+                const query = `
+                query PublicBetList {
+                  betList(limit: 40) {
+                    ... on SportBet {
+                      id
+                      amount
+                      payout
+                      odds
+                      isLive
+                      user { name }
+                      outcomes {
+                        odds
+                        fixture { name sport { slug } }
+                        market { marketType { name } }
+                        selection { name }
+                      }
+                    }
+                  }
+                }`;
+
+                try {
+                    const resp = await fetch('https://stake.com/_api/graphql', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'x-language': 'fr'
+                        },
+                        body: JSON.stringify({ query })
+                    });
+                    const data = await resp.json();
+                    return data;
+                } catch(e) {
+                    return null;
+                }
             }
-          }
-        }
-      }
-    }
-    """
+        """)
 
-    # Fallback - requete plus simple si la premiere echoue
-    query_simple = """
-    query LatestBets {
-      latestBets: betList(limit: 40) {
-        ... on SportBet {
-          id
-          amount
-          payout
-          odds
-          isLive
-          user { name }
-          outcomes {
-            odds
-            fixture { name sport { slug } }
-            market { marketType { name } }
-            selection { name }
-          }
-        }
-      }
-    }
-    """
+        if not bets_data:
+            return []
 
-    bets = []
+        raw_list = bets_data.get("data", {}).get("betList", [])
+        if not raw_list:
+            return []
 
-    # Essai requete principale
-    try:
-        async with session.post(url,
-            json={"query": query, "variables": {"limit": 40, "offset": 0}},
-            headers=headers
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                raw_list = data.get("data", {}).get("sportBetList", [])
-                if raw_list:
-                    for item in raw_list:
-                        b = item.get("bet") if item.get("bet") else item
-                        if not b:
-                            continue
-                        parsed = parse_bet(b)
-                        if parsed:
-                            bets.append(parsed)
-                    if bets:
-                        return bets
+        bets = []
+        for b in raw_list:
+            if not b:
+                continue
+            parsed = parse_bet(b)
+            if parsed:
+                bets.append(parsed)
+        return bets
+
     except Exception as e:
-        print(f"  Requete principale erreur: {e}")
-
-    # Fallback requete simple
-    try:
-        async with session.post(url,
-            json={"query": query_simple},
-            headers=headers
-        ) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                raw_list = data.get("data", {}).get("latestBets", [])
-                if raw_list:
-                    for b in raw_list:
-                        if not b:
-                            continue
-                        parsed = parse_bet(b)
-                        if parsed:
-                            bets.append(parsed)
-                    if bets:
-                        return bets
-    except Exception as e:
-        print(f"  Fallback erreur: {e}")
-
-    return []
+        print(f"  Playwright fetch erreur: {e}")
+        # Recharge la page si erreur
+        try:
+            await playwright_page.reload(wait_until="networkidle", timeout=15000)
+        except:
+            playwright_page = None
+        return []
 
 def parse_bet(b):
     try:
@@ -960,6 +937,16 @@ async def main():
             {"inline_keyboard": [[{"text": "📋 Menu principal", "callback_data": "open_menu"}]]}
         )
         print("Telegram connecte !\n")
+
+        # Initialisation du navigateur Playwright
+        print("Demarrage du navigateur automatique...")
+        try:
+            await init_browser()
+            await send_simple_message(session, "🌐 Navigateur connecte a Stake ! Paris en temps reel actifs.")
+            print("Navigateur pret !\n")
+        except Exception as e:
+            print(f"Navigateur erreur : {e}")
+            await send_simple_message(session, "⚠️ Navigateur erreur — utilisation des donnees de test.")
 
         while True:
             # Resume quotidien a minuit

@@ -9,7 +9,10 @@ from collections import defaultdict
 # ============================================================
 TELEGRAM_BOT_TOKEN = "8868714626:AAHhSU2GkIW0jdIao1I9ZvKFx71tAJtMAco"
 TELEGRAM_CHAT_ID = "7360478330"
-STAKE_API_KEY = "f513ff82e8517b407d9eb26db0e936571a3bfeefbb0cb195c2ac7dfa96c5241205edc6502b3c8d154a9c50042b61f87c"
+
+# Token de session Stake (x-access-token du navigateur)
+# A renouveler quand il expire (deconnexion de Stake)
+STAKE_SESSION_TOKEN = "edd0aade282af360a96023fdb4037702918585c2ee236b60c5e5f8f2b03bc2ccf0788b8cff2d3b041561fd5248d60588"
 
 # ============================================================
 # FILTRES PAR SPORT
@@ -42,6 +45,7 @@ bot_state = {
     "waiting_stake_sport": None,      # sport en attente de modification
     "waiting_exact_stake": False,
     "waiting_bigodds_stake": False,
+    "waiting_new_token": False,
     # Historique scans page
     "history_page": 0,
     # Session
@@ -229,6 +233,7 @@ async def send_main_menu(session):
             [{"text": "📊 Statistiques",          "callback_data": "menu_stats"}],
             [{"text": "📋 Historique scans",      "callback_data": "menu_history_0"}],
             [{"text": "⏸ Pause" if not bot_state["paused"] else "▶️ Reprendre", "callback_data": "toggle_pause"}],
+            [{"text": "🔑 Renouveler token Stake", "callback_data": "renew_token"}],
             [{"text": "🔙 Fermer",                "callback_data": "close_menu"}],
         ]
     }
@@ -533,8 +538,27 @@ async def process_telegram_updates(session):
                     elif text == "/stats":
                         await send_stats_menu(session)
 
-                    elif text == "/historique":
-                        await send_history_menu(session, 0)
+                    elif text == "/token":
+                        bot_state["waiting_new_token"] = True
+                        await send_simple_message(session,
+                            "🔑 *Renouveler le token Stake*\n\n"
+                            "1. Ouvre Stake sur Chrome\n"
+                            "2. Appuie F12 → Network\n"
+                            "3. Recharge la page F5\n"
+                            "4. Clique sur une requete graphql\n"
+                            "5. Copie la valeur de x-access-token\n\n"
+                            "Envoie-moi le nouveau token :"
+                        )
+
+                    elif bot_state["waiting_new_token"]:
+                        new_token = text.strip()
+                        if len(new_token) > 20:
+                            global STAKE_SESSION_TOKEN
+                            STAKE_SESSION_TOKEN = new_token
+                            bot_state["waiting_new_token"] = False
+                            await send_simple_message(session, "✅ Token Stake mis a jour avec succes !\nLe bot utilise maintenant le nouveau token.")
+                        else:
+                            await send_simple_message(session, "⚠️ Token invalide. Verifie et renvoie.")
 
                     elif bot_state["waiting_add_vip"]:
                         username = text.lstrip("@").strip()
@@ -610,7 +634,18 @@ async def process_telegram_updates(session):
                         continue
                     await answer_callback(session, cb_id)
 
-                    if data_cb == "open_menu":
+                    elif data_cb == "renew_token":
+                        bot_state["waiting_new_token"] = True
+                        await send_simple_message(session,
+                            "🔑 *Renouveler le token Stake*\n\n"
+                            "1. Ouvre Stake sur Chrome\n"
+                            "2. Appuie F12 → Network\n"
+                            "3. Recharge la page F5\n"
+                            "4. Clique sur une requete graphql\n"
+                            "5. Copie la valeur de *x-access-token*\n\n"
+                            "Envoie-moi le nouveau token :"
+                        )
+                    elif data_cb == "open_menu":
                         await send_main_menu(session)
                     elif data_cb == "menu_vip":
                         await send_vip_menu(session)
@@ -690,7 +725,7 @@ async def fetch_stake_bets(session):
     url = "https://stake.com/_api/graphql"
     headers = {
         "Content-Type": "application/json",
-        "x-access-token": STAKE_API_KEY,
+        "x-access-token": STAKE_SESSION_TOKEN,
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
         "referer": "https://stake.com/fr/sports/home",
         "x-language": "fr",
@@ -916,7 +951,12 @@ async def main():
         await send_simple_message(session,
             "*StakeScan demarre !*\n\n"
             "Le bot scanne les paris en temps reel.\n\n"
-            "Commandes :\n/menu — Menu principal\n/vip — Gerer les VIP\n/stats — Statistiques",
+            "Commandes :\n"
+            "/menu — Menu principal\n"
+            "/vip — Gerer les VIP\n"
+            "/stats — Statistiques\n"
+            "/historique — Historique scans\n"
+            "/token — Renouveler le token Stake",
             {"inline_keyboard": [[{"text": "📋 Menu principal", "callback_data": "open_menu"}]]}
         )
         print("Telegram connecte !\n")

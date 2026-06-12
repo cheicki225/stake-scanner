@@ -319,21 +319,28 @@ def build_selections_text(bet, cfg):
         )
     return msg
 
+def format_bet_id(bet_id):
+    # Formate l'ID avec espaces : 600207473 -> 600 207 473
+    bet_id = str(bet_id)
+    return ' '.join([bet_id[max(0,i-3):i] for i in range(len(bet_id), 0, -3)][::-1])
+
 async def send_telegram_normal(session, bet, rule_name):
     cfg = SPORT_CONFIG.get(bet["sport"], {"emoji": "?", "label": bet["sport"]})
-    now = datetime.now().strftime("%H:%M")
+    now = datetime.now().strftime("%d/%m/%Y à %H:%M")
     user = bet.get("user", "")
     display_user = "Anonyme" if not user or user == "Anonymous" else "@" + user
+    bet_id = format_bet_id(bet.get("id", "N/A"))
 
     msg = (
         f"{cfg['emoji']} *{rule_name} DETECTE*\n\n"
-        f"Parieur : {display_user}\n"
-        f"Heure : {now}\n"
-        f"Cote : x{bet.get('odd', 'N/A')}\n"
-        f"Mise : ${bet.get('stake', 0):,}\n"
-        f"Gain potentiel : ${bet.get('payout', 0):,}\n"
-        f"Live : {'Oui' if bet.get('live') else 'Non'}\n"
-        f"Combine : {'Oui' if bet.get('combo') else 'Non'}\n"
+        f"🆔 ID : {bet_id}\n"
+        f"👤 Parieur : {display_user}\n"
+        f"🕐 Active : {now}\n"
+        f"💸 Cote : x{bet.get('odd', 'N/A')}\n"
+        f"💰 Mise : ${bet.get('stake', 0):,}\n"
+        f"💵 Gain potentiel : ${bet.get('payout', 0):,}\n"
+        f"🔴 Live : {'Oui' if bet.get('live') else 'Non'}\n"
+        f"🔗 Combine : {'Oui' if bet.get('combo') else 'Non'}\n"
     )
     msg += build_selections_text(bet, cfg)
     msg += "\n_Detecte par StakeScan_"
@@ -341,18 +348,20 @@ async def send_telegram_normal(session, bet, rule_name):
 
 async def send_telegram_vip(session, bet, consecutive=1):
     cfg = SPORT_CONFIG.get(bet["sport"], {"emoji": "🎲", "label": bet["sport"]})
-    now = datetime.now().strftime("%H:%M")
+    now = datetime.now().strftime("%d/%m/%Y à %H:%M")
     user = bet.get("user", "Anonyme")
     alert_extra = f"\n🔥 *{consecutive} paris consecutifs !*" if consecutive >= 2 else ""
+    bet_id = format_bet_id(bet.get("id", "N/A"))
 
     msg = (
         f"⭐ *VIP ALERTE - @{user}*{alert_extra}\n\n"
-        f"Heure : {now}\n"
-        f"Cote : x{bet.get('odd', 'N/A')}\n"
-        f"Mise : ${bet.get('stake', 0):,}\n"
-        f"Gain potentiel : ${bet.get('payout', 0):,}\n"
-        f"Live : {'Oui' if bet.get('live') else 'Non'}\n"
-        f"Combine : {'Oui' if bet.get('combo') else 'Non'}\n"
+        f"🆔 ID : {bet_id}\n"
+        f"🕐 Active : {now}\n"
+        f"💸 Cote : x{bet.get('odd', 'N/A')}\n"
+        f"💰 Mise : ${bet.get('stake', 0):,}\n"
+        f"💵 Gain potentiel : ${bet.get('payout', 0):,}\n"
+        f"🔴 Live : {'Oui' if bet.get('live') else 'Non'}\n"
+        f"🔗 Combine : {'Oui' if bet.get('combo') else 'Non'}\n"
     )
     msg += build_selections_text(bet, cfg)
     msg += "\n_Detecte par StakeScan_"
@@ -536,20 +545,67 @@ async def process_telegram_updates(session):
         print(f"Updates erreur: {e}")
 
 # ============================================================
-# STAKE API
+# STAKE API - FLUX PUBLIC (sports/home)
 # ============================================================
 async def fetch_stake_bets(session):
     url = "https://stake.com/_api/graphql"
     headers = {
         "Content-Type": "application/json",
         "x-access-token": STAKE_API_KEY,
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "referer": "https://stake.com/fr/sports/home",
+        "x-language": "fr",
     }
+
+    # Requete pour le fil public "Tous les Paris" visible sur sports/home
     query = """
-    query BetHistory {
-      betHistory(limit: 20, offset: 0) {
+    query PublicBetList($limit: Int, $offset: Int) {
+      sportBetList(limit: $limit, offset: $offset) {
+        id
+        amount
+        payout
+        odds
+        cashoutAt
+        status
+        active
+        bet {
+          ... on SportBet {
+            id
+            amount
+            payout
+            odds
+            isLive
+            isCashout
+            user { name }
+            outcomes {
+              odds
+              result
+              fixture {
+                id
+                name
+                slug
+                sport { name slug }
+                tournament { name }
+              }
+              market { marketType { name } }
+              selection { name }
+            }
+          }
+        }
+      }
+    }
+    """
+
+    # Fallback - requete plus simple si la premiere echoue
+    query_simple = """
+    query LatestBets {
+      latestBets: betList(limit: 40) {
         ... on SportBet {
-          id amount payout odds isLive
+          id
+          amount
+          payout
+          odds
+          isLive
           user { name }
           outcomes {
             odds
@@ -561,51 +617,92 @@ async def fetch_stake_bets(session):
       }
     }
     """
+
+    bets = []
+
+    # Essai requete principale
     try:
-        async with session.post(url, json={"query": query}, headers=headers) as resp:
+        async with session.post(url,
+            json={"query": query, "variables": {"limit": 40, "offset": 0}},
+            headers=headers
+        ) as resp:
             if resp.status == 200:
                 data = await resp.json()
-                bets_raw = data.get("data", {}).get("betHistory", [])
-                bets = []
-                for b in bets_raw:
-                    if not b:
-                        continue
-                    outcomes = b.get("outcomes", [])
-                    if not outcomes:
-                        continue
-                    first = outcomes[0]
-                    sport_slug = first.get("fixture", {}).get("sport", {}).get("slug", "")
-                    market_name = first.get("market", {}).get("marketType", {}).get("name", "")
-                    is_exact = "correct score" in market_name.lower() or "score exact" in market_name.lower()
-                    sport = map_sport(sport_slug)
-                    if not sport:
-                        continue
-                    selections = []
-                    for o in outcomes:
-                        s_slug = o.get("fixture", {}).get("sport", {}).get("slug", "")
-                        selections.append({
-                            "sport": map_sport(s_slug) or sport,
-                            "match": o.get("fixture", {}).get("name", "N/A"),
-                            "market": o.get("market", {}).get("marketType", {}).get("name", "N/A"),
-                            "pick": o.get("selection", {}).get("name", "N/A"),
-                        })
-                    bets.append({
-                        "user": b.get("user", {}).get("name", "Anonymous") if b.get("user") else "Anonymous",
-                        "sport": sport, "market": market_name,
-                        "match": first.get("fixture", {}).get("name", "N/A"),
-                        "pick": first.get("selection", {}).get("name", "N/A"),
-                        "odd": float(b.get("odds", 0)),
-                        "stake": float(b.get("amount", 0)),
-                        "payout": float(b.get("payout", 0)),
-                        "combo": len(outcomes) > 1,
-                        "live": b.get("isLive", False),
-                        "exact": is_exact,
-                        "selections": selections,
-                    })
-                return bets
+                raw_list = data.get("data", {}).get("sportBetList", [])
+                if raw_list:
+                    for item in raw_list:
+                        b = item.get("bet") if item.get("bet") else item
+                        if not b:
+                            continue
+                        parsed = parse_bet(b)
+                        if parsed:
+                            bets.append(parsed)
+                    if bets:
+                        return bets
     except Exception as e:
-        print(f"  Stake API erreur: {e}")
+        print(f"  Requete principale erreur: {e}")
+
+    # Fallback requete simple
+    try:
+        async with session.post(url,
+            json={"query": query_simple},
+            headers=headers
+        ) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                raw_list = data.get("data", {}).get("latestBets", [])
+                if raw_list:
+                    for b in raw_list:
+                        if not b:
+                            continue
+                        parsed = parse_bet(b)
+                        if parsed:
+                            bets.append(parsed)
+                    if bets:
+                        return bets
+    except Exception as e:
+        print(f"  Fallback erreur: {e}")
+
     return []
+
+def parse_bet(b):
+    try:
+        outcomes = b.get("outcomes", [])
+        if not outcomes:
+            return None
+        first = outcomes[0]
+        sport_slug = first.get("fixture", {}).get("sport", {}).get("slug", "")
+        market_name = first.get("market", {}).get("marketType", {}).get("name", "")
+        is_exact = "correct score" in market_name.lower() or "score exact" in market_name.lower()
+        sport = map_sport(sport_slug)
+        if not sport:
+            return None
+        selections = []
+        for o in outcomes:
+            s_slug = o.get("fixture", {}).get("sport", {}).get("slug", "")
+            selections.append({
+                "sport": map_sport(s_slug) or sport,
+                "match": o.get("fixture", {}).get("name", "N/A"),
+                "market": o.get("market", {}).get("marketType", {}).get("name", "N/A"),
+                "pick": o.get("selection", {}).get("name", "N/A"),
+            })
+        return {
+            "user": b.get("user", {}).get("name", "Anonymous") if b.get("user") else "Anonymous",
+            "sport": sport,
+            "market": market_name,
+            "match": first.get("fixture", {}).get("name", "N/A"),
+            "pick": first.get("selection", {}).get("name", "N/A"),
+            "odd": float(b.get("odds", 0)),
+            "stake": float(b.get("amount", 0)),
+            "payout": float(b.get("payout", 0)),
+            "combo": len(outcomes) > 1,
+            "live": b.get("isLive", False),
+            "exact": is_exact,
+            "selections": selections,
+        }
+    except Exception as e:
+        print(f"  Parse bet erreur: {e}")
+        return None
 
 def map_sport(slug):
     mapping = {

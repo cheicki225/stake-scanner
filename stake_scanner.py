@@ -634,7 +634,7 @@ async def stake_websocket_listener():
             print("  WS → Connexion a wss://stake.com/_api/websockets...")
             async with websockets.connect(
                 STAKE_WS_URL,
-                additional_headers=headers,
+                extra_headers=headers,
                 subprotocols=["graphql-transport-ws"],
                 ping_interval=30,
                 ping_timeout=10,
